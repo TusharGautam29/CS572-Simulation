@@ -1,5 +1,7 @@
 import simpy
 import random
+from copy import deepcopy
+
 
 class Process:
     def __init__(self, pid, arrival, burst):
@@ -7,10 +9,11 @@ class Process:
         self.arrival = arrival
         self.burst = burst
 
-        self.start = 0
+        self.start = -1
         self.finish = 0
         self.waiting = 0
         self.turnaround = 0
+
 
 def generate_processes(sim_time):
     processes = []
