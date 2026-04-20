@@ -221,6 +221,41 @@ def mlq(env, processes, ram, quantum, timeline):
             queues[prio].append(p)
         notify()
 
+def sjf(env, processes, ram, timeline):
+    ready = []
+    wakeup, notify = _make_notifier(env)
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, ready.append, notify, timeline))
+
+    done = 0
+    while done < len(processes):
+        if not ready:
+            yield wakeup[0]
+            wakeup[0] = env.event()
+            continue
+
+        # pick shortest job
+        ready.sort(key=lambda x: x.burst)
+        p = ready.pop(0)
+
+        p.start = env.now
+        t0 = env.now
+
+        yield env.timeout(p.burst)
+
+        timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        p.finish     = env.now
+        p.waiting    = p.start - p.arrival
+        p.turnaround = p.finish - p.arrival
+
+        done += 1
+
+        yield ram.free(p.memory)
+        yield env.timeout(0)
+        notify()
+
 def run_algorithm(alg, processes_orig):
     procs    = deepcopy(processes_orig)
     timeline = []
@@ -230,6 +265,8 @@ def run_algorithm(alg, processes_orig):
         env.process(fcfs(env, procs, ram, timeline))
     elif alg == "RR":
         env.process(round_robin(env, procs, ram, QUANTUM, timeline))
+    elif alg == "SJF":
+        env.process(sjf(env, procs, ram, timeline))
     else:
         env.process(mlq(env, procs, ram, QUANTUM, timeline))
     env.run()
@@ -610,6 +647,7 @@ class SchedulerGUI(tk.Tk):
         self._tabs = {}
         for alg, label in [
             ("FCFS", f"  FCFS  "),
+            ("SJF",  f"  SJF  "),
             ("RR",   f"  Round Robin  (q={QUANTUM})  "),
             ("MLQ",  f"  MLQ  "),
         ]:
@@ -636,7 +674,7 @@ class SchedulerGUI(tk.Tk):
             ), tags=(tag,))
 
     def _run_all(self):
-        for alg in ("FCFS", "RR", "MLQ"):
+        for alg in ("FCFS", "RR", "MLQ", "SJF"):
             procs, timeline = run_algorithm(alg, self._procs)
             self._tabs[alg].update(procs, timeline)
 
