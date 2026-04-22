@@ -29,7 +29,7 @@ GANTT_PALETTE = {
     "FCFS": ["#3b82f6","#2563eb","#1d4ed8","#0ea5e9","#0284c7",
              "#60a5fa","#0369a1","#38bdf8","#075985","#7dd3fc"],
     "SJF":  ["#f59e0b","#d97706","#b45309","#fbbf24","#92400e",
-             "#fcd34d","#78350f","#fde68a","#a16207","#fed7aa"],
+             "#fcd34d","#78350f","#fde68a","#a16207","#fed7aa"],    
     "RR":   ["#a855f7","#9333ea","#7e22ce","#c084fc","#6d28d9",
              "#8b5cf6","#581c87","#7c3aed","#4c1d95","#a78bfa"],
     "MLQ":  ["#10b981","#059669","#047857","#0d9488","#0f766e",
@@ -37,6 +37,9 @@ GANTT_PALETTE = {
     # MLFQ colours are per-level, not per-process (handled specially in _draw_gantt)
     "MLFQ": ["#ef4444","#f97316","#94a3b8"],   # lvl1=red, lvl2=orange, lvl3=slate
 }
+GANTT_PALETTE["SRTF"] = GANTT_PALETTE["SJF"]
+GANTT_PALETTE["PRIO_NP"] = GANTT_PALETTE["MLQ"]
+GANTT_PALETTE["PRIO_P"]  = GANTT_PALETTE["MLQ"]
 
 # MLFQ level labels used in the Gantt legend
 MLFQ_LEVEL_COLORS = {1: "#ef4444", 2: "#f97316", 3: "#94a3b8"}
@@ -202,6 +205,132 @@ def sjf(env, processes, ram, timeline):
         yield env.timeout(0)
         notify()
 
+def srtf(env, processes, ram, timeline):    # shortest remaining time first(premtive of sjf)
+    ready = []
+    remaining = {p.pid: p.burst for p in processes}
+    wakeup, notify = _make_notifier(env)
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, ready.append, notify, timeline))
+
+    done = 0
+    current = None
+
+    while done < len(processes):
+        if not ready and current is None:
+            yield wakeup[0]
+            wakeup[0] = env.event()
+            continue
+
+        # pick shortest remaining job
+        if current:
+            ready.append(current)
+
+        ready.sort(key=lambda x: remaining[x.pid])
+        p = ready.pop(0)
+
+        if p.start == -1:
+            p.start = env.now
+
+        current = p
+        t0 = env.now
+
+        # run for 1 unit (preemption point)
+        yield env.timeout(1)
+        remaining[p.pid] -= 1
+
+        timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        if remaining[p.pid] == 0:
+            p.finish     = env.now
+            p.turnaround = p.finish - p.arrival
+            p.waiting    = p.turnaround - p.burst
+            done += 1
+            current = None
+            yield ram.free(p.memory)
+            yield env.timeout(0)
+
+        notify()
+
+def priority_np(env, processes, ram, timeline):
+    ready = []
+    wakeup, notify = _make_notifier(env)
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, ready.append, notify, timeline))
+
+    done = 0
+    while done < len(processes):
+        if not ready:
+            yield wakeup[0]
+            wakeup[0] = env.event()
+            continue
+
+        # lower number = higher priority
+        ready.sort(key=lambda x: x.priority)
+        p = ready.pop(0)
+
+        p.start = env.now
+        t0 = env.now
+
+        yield env.timeout(p.burst)
+
+        timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        p.finish     = env.now
+        p.waiting    = p.start - p.arrival
+        p.turnaround = p.finish - p.arrival
+
+        done += 1
+        yield ram.free(p.memory)
+        yield env.timeout(0)
+        notify()
+
+def priority_p(env, processes, ram, timeline):
+    ready = []
+    remaining = {p.pid: p.burst for p in processes}
+    wakeup, notify = _make_notifier(env)
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, ready.append, notify, timeline))
+
+    done = 0
+    current = None
+
+    while done < len(processes):
+        if not ready and current is None:
+            yield wakeup[0]
+            wakeup[0] = env.event()
+            continue
+
+        if current:
+            ready.append(current)
+
+        # preempt based on priority
+        ready.sort(key=lambda x: x.priority)
+        p = ready.pop(0)
+
+        if p.start == -1:
+            p.start = env.now
+
+        current = p
+        t0 = env.now
+
+        yield env.timeout(1)
+        remaining[p.pid] -= 1
+
+        timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        if remaining[p.pid] == 0:
+            p.finish     = env.now
+            p.turnaround = p.finish - p.arrival
+            p.waiting    = p.turnaround - p.burst
+            done += 1
+            current = None
+            yield ram.free(p.memory)
+            yield env.timeout(0)
+
+        notify()
 
 # ─── Round Robin ─────────────────────────────────────────────────────────────
 def round_robin(env, processes, ram, quantum, timeline):
@@ -364,6 +493,12 @@ def run_algorithm(alg, processes_orig):
         env.process(fcfs(env, procs, ram, timeline))
     elif alg == "SJF":
         env.process(sjf(env, procs, ram, timeline))
+    elif alg == "SRTF":
+        env.process(srtf(env, procs, ram, timeline))
+    elif alg == "PRIO_NP":
+        env.process(priority_np(env, procs, ram, timeline))
+    elif alg == "PRIO_P":
+        env.process(priority_p(env, procs, ram, timeline))
     elif alg == "RR":
         env.process(round_robin(env, procs, ram, QUANTUM, timeline))
     elif alg == "MLQ":
@@ -844,6 +979,9 @@ class SchedulerGUI(tk.Tk):
         for alg, label in [
             ("FCFS", "  FCFS  "),
             ("SJF",  "  SJF  "),
+            ("SRTF",  "  SRTF  "),
+            ("PRIO_NP", "  Priority (NP)  "),
+            ("PRIO_P",  "  Priority (P)  "),
             ("RR",   f"  Round Robin  (q={QUANTUM})  "),
             ("MLQ",  "  MLQ  "),
             ("MLFQ", "  MLFQ  "),
@@ -871,7 +1009,7 @@ class SchedulerGUI(tk.Tk):
             ), tags=(tag,))
 
     def _run_all(self):
-        for alg in ("FCFS", "SJF", "RR", "MLQ", "MLFQ"):
+        for alg in ("FCFS", "SJF", "SRTF", "PRIO_NP", "PRIO_P", "RR", "MLQ", "MLFQ"):
             procs, timeline = run_algorithm(alg, self._procs)
             self._tabs[alg].update(procs, timeline)
 
