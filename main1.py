@@ -1009,10 +1009,47 @@ class SchedulerGUI(tk.Tk):
             ), tags=(tag,))
 
     def _run_all(self):
+        results = {}
         for alg in ("FCFS", "SJF", "SRTF", "PRIO_NP", "PRIO_P", "RR", "MLQ", "MLFQ"):
             procs, timeline = run_algorithm(alg, self._procs)
             self._tabs[alg].update(procs, timeline)
 
+            #compute metrics
+            n = len(procs)
+            avg_w  = sum(p.waiting for p in procs) / n
+            avg_tt = sum(p.turnaround for p in procs) / n
+
+            cpu = [e for e in timeline if e[0] == "cpu"]
+            max_t = max((e[3] for e in cpu), default=1)
+            throughput = n / max_t if max_t else 0
+
+            results[alg] = {
+                "avg_w": avg_w,
+                "avg_tt": avg_tt,
+                "throughput": throughput
+            }
+        self._print_comparison(results)
+
+    def _print_comparison(self, results):
+        print("ALGORITHM COMPARISON")
+        print("="*50)
+
+        # print all results
+        for alg, data in results.items():
+            print(f"{alg:10} | WT: {data['avg_w']:.2f} | "
+                f"TAT: {data['avg_tt']:.2f} | "
+                f"TH: {data['throughput']:.3f}")
+
+        # ranking
+        best_wt  = min(results, key=lambda x: results[x]["avg_w"])
+        best_tat = min(results, key=lambda x: results[x]["avg_tt"])
+        best_th  = max(results, key=lambda x: results[x]["throughput"])
+
+        print("\nBEST PER METRIC")
+        print(f"Lowest Waiting Time     → {best_wt}")
+        print(f"Lowest Turnaround Time  → {best_tat}")
+        print(f"Highest Throughput      → {best_th}")
+        
 
 if __name__ == "__main__":
     app = SchedulerGUI()
