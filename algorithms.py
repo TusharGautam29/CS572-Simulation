@@ -160,19 +160,23 @@ def srtf(env, processes, ram, timeline):    # shortest remaining time first(prem
 
         # run for 1 unit (preemption point)
         factor = get_cache_factor(p.pid, env.now, last_run)
-        if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
-            cache_hits += 1
-            cache_state = "HIT"
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
         else:
-            cache_misses += 1
-            cache_state = "MISS"
+            cache_state = "OFF"
         yield env.timeout(max(1, int(1 * factor))) 
 
         remaining[p.pid] -= 1
         last_run[p.pid] = env.now
 
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
-        timeline.append(("cache", p.pid, env.now, cache_state, factor))
+        if CACHE_ENABLED:
+            timeline.append(("cache", p.pid, env.now, cache_state, factor))
 
         if remaining[p.pid] == 0:
             p.finish     = env.now
@@ -253,18 +257,22 @@ def priority_p(env, processes, ram, timeline):
         t0 = env.now
 
         factor = get_cache_factor(p.pid, env.now, last_run)
-        if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
-            cache_hits += 1
-            cache_state = "HIT"
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
         else:
-            cache_misses += 1
-            cache_state = "MISS"
+            cache_state = "OFF"
         yield env.timeout(max(1, int(1 * factor)))
         remaining[p.pid] -= 1
         last_run[p.pid] = env.now
 
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
-        timeline.append(("cache", p.pid, env.now, cache_state, factor))
+        if CACHE_ENABLED:
+            timeline.append(("cache", p.pid, env.now, cache_state, factor))
 
         if remaining[p.pid] == 0:
             p.finish     = env.now
@@ -297,18 +305,22 @@ def round_robin(env, processes, ram, quantum, timeline):
         run = min(quantum, remaining[p.pid])
         t0  = env.now
         factor = get_cache_factor(p.pid, env.now, last_run)
-        if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
-            cache_hits += 1
-            cache_state = "HIT"
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
         else:
-            cache_misses += 1
-            cache_state = "MISS"
+            cache_state = "OFF"
         adjusted_run = max(1, int(run * factor))
 
         yield env.timeout(adjusted_run)
 
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
-        timeline.append(("cache", p.pid, env.now, cache_state, factor))
+        if CACHE_ENABLED:
+            timeline.append(("cache", p.pid, env.now, cache_state, factor))
 
         remaining[p.pid] -= run
         last_run[p.pid] = env.now
@@ -350,17 +362,21 @@ def mlq(env, processes, ram, quantum, timeline):
         t0  = env.now
         
         factor = get_cache_factor(p.pid, env.now, last_run)
-        if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
-            cache_hits += 1
-            cache_state = "HIT"
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
         else:
-            cache_misses += 1
-            cache_state = "MISS"
+            cache_state = "OFF"
         adjusted_run = max(1, int(run * factor))
         yield env.timeout(adjusted_run)
 
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
-        timeline.append(("cache", p.pid, env.now, cache_state, factor))
+        if CACHE_ENABLED:
+            timeline.append(("cache", p.pid, env.now, cache_state, factor))
         
         remaining[p.pid] -= run
         last_run[p.pid] = env.now
@@ -442,17 +458,21 @@ def mlfq(env, processes, ram, timeline):
         t0 = env.now
 
         factor = get_cache_factor(p.pid, env.now, last_run)
-        if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
-            cache_hits += 1
-            cache_state = "HIT"
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
         else:
-            cache_misses += 1
-            cache_state = "MISS"
+            cache_state = "OFF"
         adjusted_run = max(1, int(run * factor))
         yield env.timeout(adjusted_run)
 
         # store queue LEVEL (not original priority) for colour-coding
         timeline.append(("cpu", p.pid, t0, env.now, prio))
+        timeline.append(("cache", p.pid, env.now, cache_state, factor))
 
         last_cpu[p.pid]  = env.now
         remaining[p.pid] -= run

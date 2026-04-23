@@ -516,7 +516,7 @@ class SchedulerGUI(tk.Tk):
             avg_tt = sum(p.turnaround for p in procs) / n
 
             cpu = [e for e in timeline if e[0] == "cpu"]
-            cache_logs = [e for e in timeline if e[0] == "cache"]
+            cache_logs = [e for e in timeline if e[0] == "cache"] if CACHE_ENABLED else []
 
             hits = sum(1 for e in cache_logs if e[3] == "HIT")
             misses = sum(1 for e in cache_logs if e[3] == "MISS")
@@ -542,8 +542,11 @@ class SchedulerGUI(tk.Tk):
         for alg, data in results.items():
             print(f"{alg:10} | WT: {data['avg_w']:.2f} | "
                 f"TAT: {data['avg_tt']:.2f} | "
-                f"TH: {data['throughput']:.3f} | "
-                f"CacheHit: {data['cache_hit_ratio']:.2f}")
+                f"TH: {data['throughput']:.3f} | ")
+            if CACHE_ENABLED:
+                print(f"CacheHit: {data['cache_hit_ratio']:.2f}")
+            else:
+                print(f"Cache: OFF")
 
         # ranking
         best_wt  = min(results, key=lambda x: results[x]["avg_w"])
