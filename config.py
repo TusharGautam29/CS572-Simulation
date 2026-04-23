@@ -40,3 +40,10 @@ MLFQ_LEVEL_COLORS = {1: "#ef4444", 2: "#f97316", 3: "#94a3b8"}
 MLFQ_LEVEL_LABELS = {1: "Q1 (τ=2)", 2: "Q2 (τ=4)", 3: "Q3 (τ=8)"}
 
 STAT_COLORS = ["#3b82f6", "#8b5cf6", "#10b981"]
+
+# cache
+CACHE_ENABLED = True
+CACHE_WINDOW = 5
+
+CACHE_HIT_FACTOR = 0.8
+CACHE_MISS_FACTOR = 1.2

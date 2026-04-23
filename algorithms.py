@@ -56,6 +56,18 @@ def _arrival(env, p, ram, on_ready, notify, timeline):
     on_ready(p)
     notify()
 
+def get_cache_factor(pid, now, last_run):
+    if not CACHE_ENABLED:
+        return 1.0
+
+    if pid in last_run:
+        if now - last_run[pid] <= CACHE_WINDOW:
+            return CACHE_HIT_FACTOR
+        else:
+            return CACHE_MISS_FACTOR
+
+    return CACHE_MISS_FACTOR
+
 #  FCFS
 def fcfs(env, processes, ram, timeline):
     ready = []
@@ -114,6 +126,9 @@ def sjf(env, processes, ram, timeline):
         notify()
 
 def srtf(env, processes, ram, timeline):    # shortest remaining time first(premtive of sjf)
+    last_run = {}
+    cache_hits = 0
+    cache_misses = 0      
     ready = []
     remaining = {p.pid: p.burst for p in processes}
     wakeup, notify = _make_notifier(env)
@@ -144,10 +159,24 @@ def srtf(env, processes, ram, timeline):    # shortest remaining time first(prem
         t0 = env.now
 
         # run for 1 unit (preemption point)
-        yield env.timeout(1)
+        factor = get_cache_factor(p.pid, env.now, last_run)
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
+        else:
+            cache_state = "OFF"
+        yield env.timeout(max(1, int(1 * factor))) 
+
         remaining[p.pid] -= 1
+        last_run[p.pid] = env.now
 
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+        if CACHE_ENABLED:
+            timeline.append(("cache", p.pid, env.now, cache_state, factor))
 
         if remaining[p.pid] == 0:
             p.finish     = env.now
@@ -195,6 +224,9 @@ def priority_np(env, processes, ram, timeline):
         notify()
 
 def priority_p(env, processes, ram, timeline):
+    last_run = {}
+    cache_hits = 0
+    cache_misses = 0
     ready = []
     remaining = {p.pid: p.burst for p in processes}
     wakeup, notify = _make_notifier(env)
@@ -224,10 +256,23 @@ def priority_p(env, processes, ram, timeline):
         current = p
         t0 = env.now
 
-        yield env.timeout(1)
+        factor = get_cache_factor(p.pid, env.now, last_run)
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
+        else:
+            cache_state = "OFF"
+        yield env.timeout(max(1, int(1 * factor)))
         remaining[p.pid] -= 1
+        last_run[p.pid] = env.now
 
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+        if CACHE_ENABLED:
+            timeline.append(("cache", p.pid, env.now, cache_state, factor))
 
         if remaining[p.pid] == 0:
             p.finish     = env.now
@@ -242,6 +287,9 @@ def priority_p(env, processes, ram, timeline):
 
 # ─── Round Robin ─────────────────────────────────────────────────────────────
 def round_robin(env, processes, ram, quantum, timeline):
+    last_run = {}
+    cache_hits = 0
+    cache_misses = 0
     ready     = []
     remaining = {p.pid: p.burst for p in processes}
     wakeup, notify = _make_notifier(env)
@@ -256,9 +304,27 @@ def round_robin(env, processes, ram, quantum, timeline):
             p.start = env.now
         run = min(quantum, remaining[p.pid])
         t0  = env.now
-        yield env.timeout(run)
+        factor = get_cache_factor(p.pid, env.now, last_run)
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
+        else:
+            cache_state = "OFF"
+        adjusted_run = max(1, int(run * factor))
+
+        yield env.timeout(adjusted_run)
+
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+        if CACHE_ENABLED:
+            timeline.append(("cache", p.pid, env.now, cache_state, factor))
+
         remaining[p.pid] -= run
+        last_run[p.pid] = env.now
+
         if remaining[p.pid] == 0:
             p.finish     = env.now
             p.turnaround = p.finish - p.arrival
@@ -272,6 +338,9 @@ def round_robin(env, processes, ram, quantum, timeline):
 
 # ─── MLQ ─────────────────────────────────────────────────────────────────────
 def mlq(env, processes, ram, quantum, timeline):
+    last_run = {}
+    cache_hits = 0
+    cache_misses = 0
     queues    = {1: [], 2: [], 3: []}
     remaining = {p.pid: p.burst for p in processes}
     wakeup, notify = _make_notifier(env)
@@ -291,9 +360,27 @@ def mlq(env, processes, ram, quantum, timeline):
             p.start = env.now
         run = min(quantum, remaining[p.pid]) if prio == 2 else remaining[p.pid]
         t0  = env.now
-        yield env.timeout(run)
+        
+        factor = get_cache_factor(p.pid, env.now, last_run)
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
+        else:
+            cache_state = "OFF"
+        adjusted_run = max(1, int(run * factor))
+        yield env.timeout(adjusted_run)
+
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+        if CACHE_ENABLED:
+            timeline.append(("cache", p.pid, env.now, cache_state, factor))
+        
         remaining[p.pid] -= run
+        last_run[p.pid] = env.now
+
         if remaining[p.pid] == 0:
             p.finish     = env.now
             p.turnaround = p.finish - p.arrival
@@ -324,6 +411,9 @@ def mlfq(env, processes, ram, timeline):
     (not the original process priority) so the Gantt chart can colour each
     slice by the level it ran in.
     """
+    last_run = {}
+    cache_hits = 0
+    cache_misses = 0
     queues    = {1: [], 2: [], 3: []}
     levels    = {}          # pid → current queue level
     last_cpu  = {}          # pid → sim-time of last CPU slice end (or arrival)
@@ -366,13 +456,27 @@ def mlfq(env, processes, ram, timeline):
             p.start = env.now
 
         t0 = env.now
-        yield env.timeout(run)
+
+        factor = get_cache_factor(p.pid, env.now, last_run)
+        if CACHE_ENABLED:
+            if p.pid in last_run and env.now - last_run[p.pid] <= CACHE_WINDOW:
+                cache_hits += 1
+                cache_state = "HIT"
+            else:
+                cache_misses += 1
+                cache_state = "MISS"
+        else:
+            cache_state = "OFF"
+        adjusted_run = max(1, int(run * factor))
+        yield env.timeout(adjusted_run)
 
         # store queue LEVEL (not original priority) for colour-coding
         timeline.append(("cpu", p.pid, t0, env.now, prio))
+        timeline.append(("cache", p.pid, env.now, cache_state, factor))
 
         last_cpu[p.pid]  = env.now
         remaining[p.pid] -= run
+        last_run[p.pid] = env.now
 
         if remaining[p.pid] == 0:
             p.finish     = env.now
