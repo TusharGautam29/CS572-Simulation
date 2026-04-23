@@ -5,9 +5,11 @@ from tkinter import ttk
 from copy import deepcopy
 
 # ───────────────────────────────────── simulation constants ───────────────────
-TOTAL_RAM_MB = 128
-SIM_TIME     = 50
-QUANTUM      = 3
+TOTAL_RAM_MB     = 128
+SIM_TIME         = 50
+QUANTUM          = 3
+MLFQ_QUANTA      = {1: 2, 2: 4, 3: 8}   # each level gets a longer quantum
+AGING_THRESHOLD  = 12                    # ticks without CPU → promote one level
 
 # ───────────────────────────────────── colour tokens ──────────────────────────
 BG          = "#f0f4f8"
@@ -26,17 +28,28 @@ PRIO_LABEL  = {1: "High", 2: "Med", 3: "Low"}
 GANTT_PALETTE = {
     "FCFS": ["#3b82f6","#2563eb","#1d4ed8","#0ea5e9","#0284c7",
              "#60a5fa","#0369a1","#38bdf8","#075985","#7dd3fc"],
+    "SJF":  ["#f59e0b","#d97706","#b45309","#fbbf24","#92400e",
+             "#fcd34d","#78350f","#fde68a","#a16207","#fed7aa"],    
     "RR":   ["#a855f7","#9333ea","#7e22ce","#c084fc","#6d28d9",
              "#8b5cf6","#581c87","#7c3aed","#4c1d95","#a78bfa"],
     "MLQ":  ["#10b981","#059669","#047857","#0d9488","#0f766e",
              "#34d399","#065f46","#14b8a6","#115e59","#2dd4bf"],
+    # MLFQ colours are per-level, not per-process (handled specially in _draw_gantt)
+    "MLFQ": ["#ef4444","#f97316","#94a3b8"],   # lvl1=red, lvl2=orange, lvl3=slate
 }
+GANTT_PALETTE["SRTF"] = GANTT_PALETTE["SJF"]
+GANTT_PALETTE["PRIO_NP"] = GANTT_PALETTE["MLQ"]
+GANTT_PALETTE["PRIO_P"]  = GANTT_PALETTE["MLQ"]
+
+# MLFQ level labels used in the Gantt legend
+MLFQ_LEVEL_COLORS = {1: "#ef4444", 2: "#f97316", 3: "#94a3b8"}
+MLFQ_LEVEL_LABELS = {1: "Q1 (τ=2)", 2: "Q2 (τ=4)", 3: "Q3 (τ=8)"}
 
 STAT_COLORS = ["#3b82f6", "#8b5cf6", "#10b981"]
 
 
 class RAM(simpy.Container):
-    
+
     def __init__(self, env, total_mb):
         super().__init__(env, capacity=total_mb, init=total_mb)
 
@@ -157,6 +170,168 @@ def fcfs(env, processes, ram, timeline):
         yield ram.free(p.memory); yield env.timeout(0); notify()
 
 
+# ─── SJF ─────────────────────────────────────────────────────────────────────
+def sjf(env, processes, ram, timeline):
+    ready = []
+    wakeup, notify = _make_notifier(env)
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, ready.append, notify, timeline))
+
+    done = 0
+    while done < len(processes):
+        if not ready:
+            yield wakeup[0]
+            wakeup[0] = env.event()
+            continue
+
+        ready.sort(key=lambda x: x.burst)
+        p = ready.pop(0)
+
+        p.start = env.now
+        t0 = env.now
+
+        yield env.timeout(p.burst)
+
+        timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        p.finish     = env.now
+        p.waiting    = p.start - p.arrival
+        p.turnaround = p.finish - p.arrival
+
+        done += 1
+
+        yield ram.free(p.memory)
+        yield env.timeout(0)
+        notify()
+
+def srtf(env, processes, ram, timeline):    # shortest remaining time first(premtive of sjf)
+    ready = []
+    remaining = {p.pid: p.burst for p in processes}
+    wakeup, notify = _make_notifier(env)
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, ready.append, notify, timeline))
+
+    done = 0
+    current = None
+
+    while done < len(processes):
+        if not ready and current is None:
+            yield wakeup[0]
+            wakeup[0] = env.event()
+            continue
+
+        # pick shortest remaining job
+        if current:
+            ready.append(current)
+
+        ready.sort(key=lambda x: remaining[x.pid])
+        p = ready.pop(0)
+
+        if p.start == -1:
+            p.start = env.now
+
+        current = p
+        t0 = env.now
+
+        # run for 1 unit (preemption point)
+        yield env.timeout(1)
+        remaining[p.pid] -= 1
+
+        timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        if remaining[p.pid] == 0:
+            p.finish     = env.now
+            p.turnaround = p.finish - p.arrival
+            p.waiting    = p.turnaround - p.burst
+            done += 1
+            current = None
+            yield ram.free(p.memory)
+            yield env.timeout(0)
+
+        notify()
+
+def priority_np(env, processes, ram, timeline):
+    ready = []
+    wakeup, notify = _make_notifier(env)
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, ready.append, notify, timeline))
+
+    done = 0
+    while done < len(processes):
+        if not ready:
+            yield wakeup[0]
+            wakeup[0] = env.event()
+            continue
+
+        # lower number = higher priority
+        ready.sort(key=lambda x: x.priority)
+        p = ready.pop(0)
+
+        p.start = env.now
+        t0 = env.now
+
+        yield env.timeout(p.burst)
+
+        timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        p.finish     = env.now
+        p.waiting    = p.start - p.arrival
+        p.turnaround = p.finish - p.arrival
+
+        done += 1
+        yield ram.free(p.memory)
+        yield env.timeout(0)
+        notify()
+
+def priority_p(env, processes, ram, timeline):
+    ready = []
+    remaining = {p.pid: p.burst for p in processes}
+    wakeup, notify = _make_notifier(env)
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, ready.append, notify, timeline))
+
+    done = 0
+    current = None
+
+    while done < len(processes):
+        if not ready and current is None:
+            yield wakeup[0]
+            wakeup[0] = env.event()
+            continue
+
+        if current:
+            ready.append(current)
+
+        # preempt based on priority
+        ready.sort(key=lambda x: x.priority)
+        p = ready.pop(0)
+
+        if p.start == -1:
+            p.start = env.now
+
+        current = p
+        t0 = env.now
+
+        yield env.timeout(1)
+        remaining[p.pid] -= 1
+
+        timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        if remaining[p.pid] == 0:
+            p.finish     = env.now
+            p.turnaround = p.finish - p.arrival
+            p.waiting    = p.turnaround - p.burst
+            done += 1
+            current = None
+            yield ram.free(p.memory)
+            yield env.timeout(0)
+
+        notify()
+
 # ─── Round Robin ─────────────────────────────────────────────────────────────
 def round_robin(env, processes, ram, quantum, timeline):
     ready     = []
@@ -221,6 +396,94 @@ def mlq(env, processes, ram, quantum, timeline):
             queues[prio].append(p)
         notify()
 
+
+# ─── MLFQ ────────────────────────────────────────────────────────────────────
+def mlfq(env, processes, ram, timeline):
+    """
+    Multi-Level Feedback Queue with dynamic priority.
+
+    Three queues, each with a progressively longer quantum:
+        Level 1  τ=2   (highest priority)
+        Level 2  τ=4
+        Level 3  τ=8   (lowest priority, longest quantum)
+
+    DEMOTION  – if a process uses its full quantum it moves DOWN one level.
+    AGING     – after every CPU slice we scan waiting processes; any process
+                that has not received CPU for ≥ AGING_THRESHOLD ticks is
+                promoted UP one level (prevents starvation).
+
+    The 5th field of every "cpu" timeline entry carries the *queue level*
+    (not the original process priority) so the Gantt chart can colour each
+    slice by the level it ran in.
+    """
+    queues    = {1: [], 2: [], 3: []}
+    levels    = {}          # pid → current queue level
+    last_cpu  = {}          # pid → sim-time of last CPU slice end (or arrival)
+    remaining = {p.pid: p.burst for p in processes}
+    wakeup, notify = _make_notifier(env)
+
+    def on_ready(p):
+        queues[1].append(p)
+        levels[p.pid]   = 1
+        last_cpu[p.pid] = env.now   # treat arrival as "last seen"
+
+    for p in processes:
+        env.process(_arrival(env, p, ram, on_ready, notify, timeline))
+
+    done = 0
+    while done < len(processes):
+
+        # ── aging pass: promote starving processes ─────────────────────────
+        now = env.now
+        for lvl in (2, 3):
+            aged = [p for p in queues[lvl]
+                    if now - last_cpu[p.pid] >= AGING_THRESHOLD]
+            for p in aged:
+                queues[lvl].remove(p)
+                new_lvl = lvl - 1
+                levels[p.pid] = new_lvl
+                queues[new_lvl].append(p)
+                timeline.append(("promote", now, p.pid, lvl, new_lvl))
+
+        # ── pick highest-priority non-empty queue ──────────────────────────
+        prio = next((lvl for lvl in (1, 2, 3) if queues[lvl]), None)
+        if prio is None:
+            yield wakeup[0]; wakeup[0] = env.event(); continue
+
+        p       = queues[prio].pop(0)
+        quantum = MLFQ_QUANTA[prio]
+        run     = min(quantum, remaining[p.pid])
+
+        if p.start == -1:
+            p.start = env.now
+
+        t0 = env.now
+        yield env.timeout(run)
+
+        # store queue LEVEL (not original priority) for colour-coding
+        timeline.append(("cpu", p.pid, t0, env.now, prio))
+
+        last_cpu[p.pid]  = env.now
+        remaining[p.pid] -= run
+
+        if remaining[p.pid] == 0:
+            p.finish     = env.now
+            p.turnaround = p.finish - p.arrival
+            p.waiting    = p.turnaround - p.burst
+            done += 1
+            yield ram.free(p.memory); yield env.timeout(0)
+        else:
+            # demote if we used the full quantum; otherwise re-queue same level
+            if run == quantum:
+                new_lvl = min(prio + 1, 3)
+                levels[p.pid] = new_lvl
+                queues[new_lvl].append(p)
+                timeline.append(("demote", env.now, p.pid, prio, new_lvl))
+            else:
+                queues[prio].append(p)
+
+        notify()
+
 def run_algorithm(alg, processes_orig):
     procs    = deepcopy(processes_orig)
     timeline = []
@@ -228,10 +491,20 @@ def run_algorithm(alg, processes_orig):
     ram      = RAM(env, TOTAL_RAM_MB)
     if alg == "FCFS":
         env.process(fcfs(env, procs, ram, timeline))
+    elif alg == "SJF":
+        env.process(sjf(env, procs, ram, timeline))
+    elif alg == "SRTF":
+        env.process(srtf(env, procs, ram, timeline))
+    elif alg == "PRIO_NP":
+        env.process(priority_np(env, procs, ram, timeline))
+    elif alg == "PRIO_P":
+        env.process(priority_p(env, procs, ram, timeline))
     elif alg == "RR":
         env.process(round_robin(env, procs, ram, QUANTUM, timeline))
-    else:
+    elif alg == "MLQ":
         env.process(mlq(env, procs, ram, QUANTUM, timeline))
+    elif alg == "MLFQ":
+        env.process(mlfq(env, procs, ram, timeline))
     env.run()
     return procs, timeline
 
@@ -296,6 +569,26 @@ class AlgorithmTab(tk.Frame):
                      font=("Segoe UI", 9, "bold"),
                      padx=14, pady=6, relief="flat").pack(side="left", padx=(0, 4))
 
+        # MLFQ-specific: demotion / promotion counters
+        if self.alg == "MLFQ":
+            self._mlfq_vars = []
+            for lbl, color in [("Demotions", "#ef4444"), ("Promotions", "#22c55e")]:
+                var = tk.StringVar(value=f"{lbl}: —")
+                self._mlfq_vars.append(var)
+                tk.Label(sf, textvariable=var,
+                         bg=color, fg="white",
+                         font=("Segoe UI", 9, "bold"),
+                         padx=14, pady=6, relief="flat").pack(side="left", padx=(0, 4))
+
+            # level legend
+            leg = tk.Frame(sf, bg=BG)
+            leg.pack(side="right", padx=4)
+            for lvl in (1, 2, 3):
+                tk.Label(leg, text=f"■ {MLFQ_LEVEL_LABELS[lvl]}",
+                         bg=MLFQ_LEVEL_COLORS[lvl], fg="white",
+                         font=("Segoe UI", 8, "bold"),
+                         padx=6, pady=3).pack(side="left", padx=2)
+
         # ── Gantt chart ────────────────────────────────────────────────────
         gf = tk.Frame(self, bg=PANEL_BG, highlightthickness=1,
                       highlightbackground=BORDER)
@@ -334,6 +627,9 @@ class AlgorithmTab(tk.Frame):
         labels = ("Avg Wait", "Avg TAT", "Throughput")
         for var, lbl in zip(self._stat_vars, labels):
             var.set(f"{lbl}: —")
+        if self.alg == "MLFQ":
+            for var, lbl in zip(self._mlfq_vars, ("Demotions", "Promotions")):
+                var.set(f"{lbl}: —")
 
     def update(self, procs, timeline):
         self._fill_table(procs)
@@ -365,15 +661,36 @@ class AlgorithmTab(tk.Frame):
         for var, lbl, val in zip(self._stat_vars, labels, values):
             var.set(f"{lbl}: {val}")
 
+        if self.alg == "MLFQ":
+            demotions  = sum(1 for e in timeline if e[0] == "demote")
+            promotions = sum(1 for e in timeline if e[0] == "promote")
+            self._mlfq_vars[0].set(f"Demotions: {demotions}")
+            self._mlfq_vars[1].set(f"Promotions: {promotions}")
+
     def _draw_gantt(self, procs, timeline):
         self._canvas.delete("all")
         cpu = [e for e in timeline if e[0] == "cpu"]
         if not cpu:
             return
 
-        palette  = GANTT_PALETTE[self.alg]
+        ROW_H   = 30
+        ROW_GAP = 5
+        LEFT    = 54
+        TOP     = 28
+        PX      = 16
 
-        # stable row order: first CPU appearance
+        max_t = max(e[3] for e in cpu)
+        if self.alg == "MLFQ":
+            self._draw_gantt_mlfq(cpu, timeline, max_t,
+                                  ROW_H, ROW_GAP, LEFT, TOP, PX)
+        else:
+            self._draw_gantt_standard(cpu, max_t,
+                                      ROW_H, ROW_GAP, LEFT, TOP, PX)
+
+    def _draw_gantt_standard(self, cpu, max_t, ROW_H, ROW_GAP, LEFT, TOP, PX):
+        """Original per-process colour Gantt used by FCFS / SJF / RR / MLQ."""
+        palette = GANTT_PALETTE[self.alg]
+
         pid_first = {}
         for _, pid, t0, t1, prio in cpu:
             pid_first.setdefault(pid, t0)
@@ -382,43 +699,20 @@ class AlgorithmTab(tk.Frame):
         pid_color = {pid: palette[i % len(palette)]
                      for i, pid in enumerate(pids)}
 
-        ROW_H   = 30
-        ROW_GAP = 5
-        LEFT    = 54      # label column width
-        TOP     = 28      # axis header height
-        PX      = 16      # pixels per time unit
-
-        max_t = max(e[3] for e in cpu)
-        W     = LEFT + max_t * PX + 24
-        H     = TOP  + len(pids) * (ROW_H + ROW_GAP) + 18
-
+        W = LEFT + max_t * PX + 24
+        H = TOP  + len(pids) * (ROW_H + ROW_GAP) + 18
         self._canvas.configure(scrollregion=(0, 0, W, H))
 
-        # ── grid lines ────────────────────────────────────────────────────
-        for t in range(0, max_t + 1):
-            x     = LEFT + t * PX
-            major = (t % 5 == 0)
-            self._canvas.create_line(x, TOP - 6, x, H - 12,
-                                     fill="#cbd5e1" if major else "#f1f5f9",
-                                     width=1 if major else 1)
-            if major:
-                self._canvas.create_text(x, TOP - 15, text=str(t),
-                                         font=("Consolas", 7),
-                                         fill=TEXT_MID, anchor="center")
+        self._draw_grid(max_t, LEFT, TOP, H, PX)
 
-        # ── row labels + background stripes ───────────────────────────────
         for pid, row in pid_row.items():
             y = TOP + row * (ROW_H + ROW_GAP)
-            self._canvas.create_rectangle(
-                LEFT, y, LEFT + max_t * PX, y + ROW_H,
-                fill="#f8fafc", outline="")
-            self._canvas.create_text(
-                LEFT - 6, y + ROW_H // 2,
-                text=pid,
-                font=("Consolas", 9, "bold"),
-                fill=TEXT_DARK, anchor="e")
+            self._canvas.create_rectangle(LEFT, y, LEFT + max_t * PX, y + ROW_H,
+                                          fill="#f8fafc", outline="")
+            self._canvas.create_text(LEFT - 6, y + ROW_H // 2,
+                                     text=pid, font=("Consolas", 9, "bold"),
+                                     fill=TEXT_DARK, anchor="e")
 
-        # ── CPU slices ────────────────────────────────────────────────────
         for _, pid, t0, t1, prio in cpu:
             row   = pid_row[pid]
             x1    = LEFT + t0 * PX
@@ -427,23 +721,100 @@ class AlgorithmTab(tk.Frame):
             y2    = y1 + ROW_H
             color = pid_color[pid]
             w     = x2 - x1
-
-            self._canvas.create_rectangle(
-                x1 + 1, y1 + 2, x2 - 1, y2 - 2,
-                fill=color, outline="")
-
+            self._canvas.create_rectangle(x1 + 1, y1 + 2, x2 - 1, y2 - 2,
+                                          fill=color, outline="")
             if w >= 14:
-                self._canvas.create_text(
-                    (x1 + x2) / 2, (y1 + y2) / 2,
-                    text=pid if w >= 26 else "·",
-                    font=("Consolas", 8, "bold"),
-                    fill="white")
+                self._canvas.create_text((x1 + x2) / 2, (y1 + y2) / 2,
+                                         text=pid if w >= 26 else "·",
+                                         font=("Consolas", 8, "bold"), fill="white")
 
-        # ── end-of-time marker ────────────────────────────────────────────
         x = LEFT + max_t * PX
         self._canvas.create_text(x, TOP - 15, text=str(max_t),
                                   font=("Consolas", 7, "bold"),
                                   fill=TEXT_DARK, anchor="center")
+
+    def _draw_gantt_mlfq(self, cpu, timeline, max_t,
+                         ROW_H, ROW_GAP, LEFT, TOP, PX):
+        """
+        MLFQ Gantt: one row per process, slices coloured by *queue level*.
+        Demotion  arrows (▼) and promotion stars (★) are drawn at the
+        right edge of the slice where the transition occurred.
+        """
+        pid_first = {}
+        for _, pid, t0, t1, lvl in cpu:
+            pid_first.setdefault(pid, t0)
+        pids    = sorted(pid_first, key=pid_first.get)
+        pid_row = {pid: i for i, pid in enumerate(pids)}
+
+        W = LEFT + max_t * PX + 24
+        H = TOP  + len(pids) * (ROW_H + ROW_GAP) + 44   # extra for legend
+        self._canvas.configure(scrollregion=(0, 0, W, H))
+
+        self._draw_grid(max_t, LEFT, TOP, H, PX)
+
+        for pid, row in pid_row.items():
+            y = TOP + row * (ROW_H + ROW_GAP)
+            self._canvas.create_rectangle(LEFT, y, LEFT + max_t * PX, y + ROW_H,
+                                          fill="#f8fafc", outline="")
+            self._canvas.create_text(LEFT - 6, y + ROW_H // 2,
+                                     text=pid, font=("Consolas", 9, "bold"),
+                                     fill=TEXT_DARK, anchor="e")
+
+        # draw CPU slices coloured by queue level
+        for _, pid, t0, t1, lvl in cpu:
+            row   = pid_row[pid]
+            x1    = LEFT + t0 * PX
+            x2    = LEFT + t1 * PX
+            y1    = TOP  + row * (ROW_H + ROW_GAP)
+            y2    = y1 + ROW_H
+            color = MLFQ_LEVEL_COLORS[lvl]
+            w     = x2 - x1
+            self._canvas.create_rectangle(x1 + 1, y1 + 2, x2 - 1, y2 - 2,
+                                          fill=color, outline="")
+            if w >= 14:
+                label = pid if w >= 26 else f"Q{lvl}"
+                self._canvas.create_text((x1 + x2) / 2, (y1 + y2) / 2,
+                                         text=label,
+                                         font=("Consolas", 8, "bold"), fill="white")
+
+        # demotion / promotion markers
+        for entry in timeline:
+            if entry[0] not in ("demote", "promote"):
+                continue
+            kind, t, pid, old_lvl, new_lvl = entry
+            if pid not in pid_row:
+                continue
+            row = pid_row[pid]
+            x   = LEFT + t * PX
+            y   = TOP  + row * (ROW_H + ROW_GAP)
+            if kind == "demote":
+                sym, col = "▼", "#dc2626"
+                self._canvas.create_text(x, y - 2, text=sym,
+                                         font=("Segoe UI", 9), fill=col,
+                                         anchor="s")
+            else:
+                sym, col = "▲", "#16a34a"
+                self._canvas.create_text(x, y + ROW_H + 2, text=sym,
+                                         font=("Segoe UI", 9), fill=col,
+                                         anchor="n")
+
+        # end-of-time marker
+        x = LEFT + max_t * PX
+        self._canvas.create_text(x, TOP - 15, text=str(max_t),
+                                  font=("Consolas", 7, "bold"),
+                                  fill=TEXT_DARK, anchor="center")
+
+    def _draw_grid(self, max_t, LEFT, TOP, H, PX):
+        for t in range(0, max_t + 1):
+            x     = LEFT + t * PX
+            major = (t % 5 == 0)
+            self._canvas.create_line(x, TOP - 6, x, H - 12,
+                                     fill="#cbd5e1" if major else "#f1f5f9",
+                                     width=1)
+            if major:
+                self._canvas.create_text(x, TOP - 15, text=str(t),
+                                         font=("Consolas", 7),
+                                         fill=TEXT_MID, anchor="center")
 
 
 class SchedulerGUI(tk.Tk):
@@ -463,7 +834,6 @@ class SchedulerGUI(tk.Tk):
         self._build_body()
         self._regenerate()
 
-        # set initial sash position after layout is committed
         self.after(60, lambda: self._pane.sash_place(0, 270, 0))
 
     # ── ttk styles ────────────────────────────────────────────────────────────
@@ -532,15 +902,14 @@ class SchedulerGUI(tk.Tk):
                       activeforeground="white",
                       cursor="hand2").pack(side="left", padx=3)
 
-        # sub-info strip
         sub = tk.Frame(self, bg=SUBHDR_BG)
         sub.pack(fill="x")
         for text in [
             f"RAM: {TOTAL_RAM_MB} MB",
-            f"Quantum: {QUANTUM}",
-            f"Sim Window: {SIM_TIME} ticks",
-            "  Priority →  High (FCFS) · Med (RR) · Low (FCFS)  ",
-            "  Colour  →  Red = High · Amber = Med · Green = Low",
+            f"Quantum: {QUANTUM}  |  MLFQ quanta: Q1={MLFQ_QUANTA[1]} Q2={MLFQ_QUANTA[2]} Q3={MLFQ_QUANTA[3]}",
+            f"Sim Window: {SIM_TIME} ticks  |  Aging threshold: {AGING_THRESHOLD} ticks",
+            "  Colour →  Red = High · Amber = Med · Green = Low",
+            "  MLFQ →  ▼ demotion  ▲ promotion (aging)",
         ]:
             tk.Label(sub, text=text, bg=SUBHDR_BG, fg="#64748b",
                      font=("Segoe UI", 8)).pack(side="left", padx=12, pady=3)
@@ -588,7 +957,6 @@ class SchedulerGUI(tk.Tk):
         self._ptree.tag_configure("M", background="#fffbeb", foreground="#92400e")
         self._ptree.tag_configure("L", background="#f0fdf4", foreground="#166534")
 
-        # legend
         leg = tk.Frame(left, bg=PANEL_BG)
         leg.pack(fill="x", padx=8, pady=(0, 10))
         for lbl, bg_c, fg_c in [
@@ -609,9 +977,14 @@ class SchedulerGUI(tk.Tk):
 
         self._tabs = {}
         for alg, label in [
-            ("FCFS", f"  FCFS  "),
+            ("FCFS", "  FCFS  "),
+            ("SJF",  "  SJF  "),
+            ("SRTF",  "  SRTF  "),
+            ("PRIO_NP", "  Priority (NP)  "),
+            ("PRIO_P",  "  Priority (P)  "),
             ("RR",   f"  Round Robin  (q={QUANTUM})  "),
-            ("MLQ",  f"  MLQ  "),
+            ("MLQ",  "  MLQ  "),
+            ("MLFQ", "  MLFQ  "),
         ]:
             tab = AlgorithmTab(self._nb, alg)
             self._nb.add(tab, text=label)
@@ -636,9 +1009,47 @@ class SchedulerGUI(tk.Tk):
             ), tags=(tag,))
 
     def _run_all(self):
-        for alg in ("FCFS", "RR", "MLQ"):
+        results = {}
+        for alg in ("FCFS", "SJF", "SRTF", "PRIO_NP", "PRIO_P", "RR", "MLQ", "MLFQ"):
             procs, timeline = run_algorithm(alg, self._procs)
             self._tabs[alg].update(procs, timeline)
+
+            #compute metrics
+            n = len(procs)
+            avg_w  = sum(p.waiting for p in procs) / n
+            avg_tt = sum(p.turnaround for p in procs) / n
+
+            cpu = [e for e in timeline if e[0] == "cpu"]
+            max_t = max((e[3] for e in cpu), default=1)
+            throughput = n / max_t if max_t else 0
+
+            results[alg] = {
+                "avg_w": avg_w,
+                "avg_tt": avg_tt,
+                "throughput": throughput
+            }
+        self._print_comparison(results)
+
+    def _print_comparison(self, results):
+        print("ALGORITHM COMPARISON")
+        print("="*50)
+
+        # print all results
+        for alg, data in results.items():
+            print(f"{alg:10} | WT: {data['avg_w']:.2f} | "
+                f"TAT: {data['avg_tt']:.2f} | "
+                f"TH: {data['throughput']:.3f}")
+
+        # ranking
+        best_wt  = min(results, key=lambda x: results[x]["avg_w"])
+        best_tat = min(results, key=lambda x: results[x]["avg_tt"])
+        best_th  = max(results, key=lambda x: results[x]["throughput"])
+
+        print("\nBEST PER METRIC")
+        print(f"Lowest Waiting Time     → {best_wt}")
+        print(f"Lowest Turnaround Time  → {best_tat}")
+        print(f"Highest Throughput      → {best_th}")
+        
 
 if __name__ == "__main__":
     app = SchedulerGUI()
