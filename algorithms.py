@@ -23,6 +23,7 @@ def _arrival(env, p, ram, on_ready, notify, timeline):
 def _do_ctx_switch(p, prev_pid, cache):
     
     if prev_pid is not None and prev_pid == p.pid:
+        cache.hits+=1
         return 0, True                          # same process — no cost
 
     is_hit     = cache.access(p.pid, p.cache_required)
@@ -141,7 +142,7 @@ def srtf(env, processes, ram, cache, timeline):
 
         if p.start == -1:
             p.start = env.now
-        current = p
+        current = p 
         t0      = env.now
         yield env.timeout(1)
         remaining[p.pid] -= 1
@@ -217,6 +218,7 @@ def priority_p(env, processes, ram, cache, timeline):
         ready.sort(key=lambda x: x.priority)
         p = ready.pop(0)
 
+        # context switch
         penalty, is_hit = _do_ctx_switch(p, prev_pid, cache)
         if penalty:
             cs_t0 = env.now
@@ -225,11 +227,19 @@ def priority_p(env, processes, ram, cache, timeline):
 
         if p.start == -1:
             p.start = env.now
-        current = p
-        t0      = env.now
-        yield env.timeout(1)
-        remaining[p.pid] -= 1
+
+        # execution
+        TIME_SLICE = 2
+        run = min(remaining[p.pid], TIME_SLICE)
+
+        t0 = env.now
+        yield env.timeout(run)
+        remaining[p.pid] -= run
+
         timeline.append(("cpu", p.pid, t0, env.now, p.priority))
+
+        # update state
+        prev_pid = p.pid
 
         if remaining[p.pid] == 0:
             p.finish     = env.now
@@ -237,11 +247,13 @@ def priority_p(env, processes, ram, cache, timeline):
             p.waiting    = p.turnaround - p.burst
             done        += 1
             current      = None
-            cache.evict(p.pid); p.in_cache = False
+            cache.evict(p.pid)
+            p.in_cache = False
             yield ram.free(p.memory)
             yield env.timeout(0)
+        else:
+            current = p
         notify()
-
 
 #  Round Robin 
 def round_robin(env, processes, ram, cache, quantum, timeline):
