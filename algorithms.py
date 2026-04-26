@@ -31,10 +31,6 @@ def _do_ctx_switch(p, prev_pid, cache):
     penalty    = CONTEXT_SWITCH_COST + (0 if is_hit else CACHE_MISS_PENALTY)
     return penalty, is_hit
 
-#Scheduling algorithms  —  each now accepts `cache` as a parameter
-#  Integration points:
-#    ① _do_ctx_switch()  called before every CPU burst
-#    ② cache.evict(pid)  called after every RAM free (process done)
 
 #  FCFS
 def fcfs(env, processes, ram, cache, timeline):
@@ -50,7 +46,7 @@ def fcfs(env, processes, ram, cache, timeline):
 
         p = ready.pop(0)
 
-        # ① context switch + cache check
+       
         penalty, is_hit = _do_ctx_switch(p, prev_pid, cache)
         if penalty:
             cs_t0 = env.now
@@ -75,7 +71,7 @@ def fcfs(env, processes, ram, cache, timeline):
         yield env.timeout(0); notify()
 
 
-#  SJF 
+#  SJF
 def sjf(env, processes, ram, cache, timeline):
     ready = []
     wakeup, notify = _make_notifier(env)

@@ -109,22 +109,23 @@ class Process:
 
 
 def generate_processes(sim_time):
-    procs, t, pid = [], 0, 1
-    while t < sim_time:
-        t += random.randint(1, 5)
-        if t > sim_time:
-            break
-        procs.append(Process(
-            pid=f"P{pid}",
-            arrival=t,
-            burst=random.randint(2, 8),
-            priority=random.randint(1, 3),
-            memory=random.randint(16, 64),
-            cache_required=random.randint(8, 48),   # working-set units
-        ))
-        pid += 1
-    return procs
+    procs, pid = [], 1
 
+    for t in range(sim_time):
+        num_arrivals = random.randint(0, 3)   # 0 to 3 processes at SAME time
+
+        for _ in range(num_arrivals):
+            procs.append(Process(
+                pid=f"P{pid}",
+                arrival=t,
+                burst=random.randint(2, 180),
+                priority=random.randint(1, 3),
+                memory=random.randint(16, 64),
+                cache_required=random.randint(8, 48),
+            ))
+            pid += 1
+
+    return procs
 
 
 
