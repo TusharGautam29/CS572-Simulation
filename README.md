@@ -5,5 +5,5 @@ Ayush Sharma - 2303307
 
 # Instruction to run
 
--> git clone https://github.com/TusharGautam29/CS572-Simulation
+-> git clone https://github.com/TusharGautam29/CS572-Simulation<br>
 -> In the terminal: python main.py
